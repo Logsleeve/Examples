@@ -1,0 +1,8 @@
+% folder with product txt files (each line is a part number)
+folder = "C:\data\parts_txt";
+res = product_setcover(folder, 'minLen',4, 'maxLen',10, 'nonOverlap', true, 'verbose', true);
+
+% inspect results for first product
+res(1).productName
+res(1).selected       % substrings to use as Outlook keywords
+res(1).notes
