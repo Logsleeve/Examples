@@ -1,0 +1,988 @@
+# ==============================================================================
+
+# CORE REPOSITORY TOOLS
+
+# ==============================================================================
+
+function Initialize-VCSRepository {
+<#
+.SYNOPSIS
+Creates a new VCS repository in the specified directory.
+
+```
+.DESCRIPTION
+Initializes a version control repository structure with manifest and folders.
+
+.PARAMETER Path
+The directory where the repository should be initialized.
+
+.EXAMPLE
+Initialize-VCSRepository -Path C:\Scripts
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$Path = (Get-Location)
+)
+
+process {
+    $vcsPath = Join-Path -Path $Path.FullName -ChildPath ".vcs"
+    
+    if (Test-Path -Path $vcsPath) {
+        Write-Warning -Message "Repository already exists at $($Path.FullName)"
+        return
+    }
+    
+    if ($PSCmdlet.ShouldProcess($Path.FullName, "Initialize VCS repository")) {
+        # Create directory structure
+        $commitsPath = Join-Path -Path $vcsPath -ChildPath "commits"
+        $branchesPath = Join-Path -Path $vcsPath -ChildPath "branches"
+        
+        New-Item -ItemType Directory -Path $vcsPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $commitsPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $branchesPath -Force | Out-Null
+        
+        # Create initial manifest
+        $manifest = [PSCustomObject]@{
+            CurrentBranch = "main"
+            Branches = @{
+                main = @{
+                    Commits = @()
+                    Head = $null
+                }
+            }
+            CommitCounter = 0
+        }
+        
+        $manifestPath = Join-Path -Path $vcsPath -ChildPath "manifest.json"
+        $manifest | ConvertTo-Json -Depth 10 | Set-Content -Path $manifestPath
+        
+        # Hide the .vcs folder
+        $vcsItem = Get-Item -Path $vcsPath
+        $vcsItem.Attributes = 'Hidden'
+        
+        Write-Output -InputObject $manifest
+    }
+}
+```
+
+}
+
+function Find-VCSRepository {
+<#
+.SYNOPSIS
+Locates the .vcs repository folder starting from the current or specified directory.
+
+```
+.DESCRIPTION
+Searches upward through the directory tree to find a .vcs repository folder.
+
+.PARAMETER StartPath
+The directory to start searching from.
+
+.EXAMPLE
+Find-VCSRepository
+
+.EXAMPLE
+Find-VCSRepository -StartPath C:\Scripts\SubFolder
+#>
+[CmdletBinding()]
+[OutputType([System.IO.DirectoryInfo])]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$StartPath = (Get-Location)
+)
+
+process {
+    $currentPath = $StartPath.FullName
+    
+    while ($currentPath) {
+        $vcsPath = Join-Path -Path $currentPath -ChildPath ".vcs"
+        
+        if (Test-Path -Path $vcsPath) {
+            return Get-Item -Path $vcsPath
+        }
+        
+        $parentPath = Split-Path -Path $currentPath -Parent
+        if ($parentPath -eq $currentPath) {
+            break
+        }
+        $currentPath = $parentPath
+    }
+    
+    Write-Error -Message "Not a VCS repository (or any parent up to root)" -ErrorAction Stop
+}
+```
+
+}
+
+function Get-VCSManifest {
+<#
+.SYNOPSIS
+Retrieves the repository manifest object.
+
+```
+.DESCRIPTION
+Reads and parses the manifest.json file from the repository.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Find-VCSRepository | Get-VCSManifest
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifestPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "manifest.json"
+    
+    if (-not (Test-Path -Path $manifestPath)) {
+        Write-Error -Message "Manifest file not found at $manifestPath" -ErrorAction Stop
+    }
+    
+    $manifest = Get-Content -Path $manifestPath | ConvertFrom-Json
+    Write-Output -InputObject $manifest
+}
+```
+
+}
+
+function Set-VCSManifest {
+<#
+.SYNOPSIS
+Saves the repository manifest object.
+
+```
+.DESCRIPTION
+Writes the manifest object back to manifest.json.
+
+.PARAMETER Manifest
+The manifest object to save.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+$manifest = Find-VCSRepository | Get-VCSManifest
+$manifest.CommitCounter++
+$manifest | Set-VCSManifest
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+    [PSCustomObject]$Manifest,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifestPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "manifest.json"
+    
+    if ($PSCmdlet.ShouldProcess($manifestPath, "Save manifest")) {
+        $Manifest | ConvertTo-Json -Depth 10 | Set-Content -Path $manifestPath
+    }
+}
+```
+
+}
+
+# ==============================================================================
+
+# STAGING TOOLS
+
+# ==============================================================================
+
+function Get-VCSStagingArea {
+<#
+.SYNOPSIS
+Retrieves the current staging area contents.
+
+```
+.DESCRIPTION
+Reads the staging.json file if it exists, otherwise returns empty staging object.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Find-VCSRepository | Get-VCSStagingArea
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $stagingPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "staging.json"
+    
+    if (Test-Path -Path $stagingPath) {
+        $staging = Get-Content -Path $stagingPath | ConvertFrom-Json
+    } else {
+        $staging = [PSCustomObject]@{
+            Files = @()
+        }
+    }
+    
+    Write-Output -InputObject $staging
+}
+```
+
+}
+
+function Add-VCSFileToStaging {
+<#
+.SYNOPSIS
+Adds files to the staging area.
+
+```
+.DESCRIPTION
+Stages files for the next commit. Accepts file paths or FileInfo objects.
+
+.PARAMETER File
+The file(s) to add to staging.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Get-ChildItem -Filter *.ps1 | Add-VCSFileToStaging
+
+.EXAMPLE
+Add-VCSFileToStaging -File script.ps1
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+    [Alias('FullName')]
+    [string[]]$File,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+begin {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $staging = Get-VCSStagingArea -RepositoryPath $RepositoryPath
+    $filesToAdd = [System.Collections.Generic.List[string]]::new()
+}
+
+process {
+    foreach ($filePath in $File) {
+        if (Test-Path -Path $filePath) {
+            $resolvedPath = Resolve-Path -Path $filePath | Select-Object -ExpandProperty Path
+            $filesToAdd.Add($resolvedPath)
+        } else {
+            Write-Warning -Message "File not found: $filePath"
+        }
+    }
+}
+
+end {
+    # Combine with existing staged files and remove duplicates
+    $allFiles = @($staging.Files) + @($filesToAdd)
+    $staging.Files = @($allFiles | Select-Object -Unique)
+    
+    $stagingPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "staging.json"
+    
+    if ($PSCmdlet.ShouldProcess($stagingPath, "Stage $($filesToAdd.Count) file(s)")) {
+        $staging | ConvertTo-Json | Set-Content -Path $stagingPath
+        Write-Output -InputObject $staging
+    }
+}
+```
+
+}
+
+function Clear-VCSStagingArea {
+<#
+.SYNOPSIS
+Clears the staging area.
+
+```
+.DESCRIPTION
+Removes the staging.json file, clearing all staged files.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Find-VCSRepository | Clear-VCSStagingArea
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $stagingPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "staging.json"
+    
+    if (Test-Path -Path $stagingPath) {
+        if ($PSCmdlet.ShouldProcess($stagingPath, "Clear staging area")) {
+            Remove-Item -Path $stagingPath -Force
+        }
+    }
+}
+```
+
+}
+
+# ==============================================================================
+
+# COMMIT TOOLS
+
+# ==============================================================================
+
+function New-VCSCommit {
+<#
+.SYNOPSIS
+Creates a new commit from the staging area.
+
+```
+.DESCRIPTION
+Takes all staged files and creates a commit snapshot with metadata.
+
+.PARAMETER Message
+The commit message describing the changes.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+New-VCSCommit -Message "Fixed bug in data processing"
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Message,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $staging = Get-VCSStagingArea -RepositoryPath $RepositoryPath
+    
+    if ($staging.Files.Count -eq 0) {
+        Write-Warning -Message "No files staged for commit"
+        return
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    $commitId = "commit_{0:D6}" -f $manifest.CommitCounter
+    $manifest.CommitCounter++
+    
+    # Create commit directory
+    $commitPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "commits\$commitId"
+    New-Item -ItemType Directory -Path $commitPath -Force | Out-Null
+    
+    # Copy files and calculate hashes
+    $commitFiles = @{}
+    foreach ($filePath in $staging.Files) {
+        if (Test-Path -Path $filePath) {
+            $fileName = Split-Path -Path $filePath -Leaf
+            $destinationPath = Join-Path -Path $commitPath -ChildPath $fileName
+            Copy-Item -Path $filePath -Destination $destinationPath
+            
+            $fileHash = Get-FileHash -Path $filePath -Algorithm MD5 | Select-Object -ExpandProperty Hash
+            $commitFiles[$filePath] = $fileHash
+        }
+    }
+    
+    # Create commit metadata
+    $commitData = [PSCustomObject]@{
+        Id = $commitId
+        Message = $Message
+        Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Branch = $manifest.CurrentBranch
+        Files = $commitFiles
+        Parent = $manifest.Branches.($manifest.CurrentBranch).Head
+    }
+    
+    $commitMetadataPath = Join-Path -Path $commitPath -ChildPath "commit.json"
+    
+    if ($PSCmdlet.ShouldProcess($commitId, "Create commit")) {
+        $commitData | ConvertTo-Json -Depth 10 | Set-Content -Path $commitMetadataPath
+        
+        # Update branch
+        $manifest.Branches.($manifest.CurrentBranch).Commits += $commitId
+        $manifest.Branches.($manifest.CurrentBranch).Head = $commitId
+        
+        $manifest | Set-VCSManifest -RepositoryPath $RepositoryPath
+        
+        Clear-VCSStagingArea -RepositoryPath $RepositoryPath
+        
+        Write-Output -InputObject $commitData
+    }
+}
+```
+
+}
+
+function Get-VCSCommit {
+<#
+.SYNOPSIS
+Retrieves commit information.
+
+```
+.DESCRIPTION
+Gets commit metadata from the repository.
+
+.PARAMETER CommitId
+The ID of the commit to retrieve.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Get-VCSCommit -CommitId commit_000001
+
+.EXAMPLE
+Get-VCSBranch -Name main | Get-VCSCommit
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+    [Alias('Id')]
+    [string[]]$CommitId,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+begin {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+}
+
+process {
+    foreach ($id in $CommitId) {
+        $commitMetadataPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "commits\$id\commit.json"
+        
+        if (Test-Path -Path $commitMetadataPath) {
+            $commit = Get-Content -Path $commitMetadataPath | ConvertFrom-Json
+            Write-Output -InputObject $commit
+        } else {
+            Write-Warning -Message "Commit not found: $id"
+        }
+    }
+}
+```
+
+}
+
+function Get-VCSCommitHistory {
+<#
+.SYNOPSIS
+Retrieves commit history for a branch.
+
+```
+.DESCRIPTION
+Gets the commit log for the current or specified branch.
+
+.PARAMETER BranchName
+The name of the branch. Defaults to current branch.
+
+.PARAMETER Limit
+Maximum number of commits to retrieve.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Get-VCSCommitHistory -Limit 5
+
+.EXAMPLE
+Get-VCSCommitHistory -BranchName experimental
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$BranchName,
+    
+    [Parameter(Mandatory = $false)]
+    [int]$Limit = 10,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    
+    if (-not $BranchName) {
+        $BranchName = $manifest.CurrentBranch
+    }
+    
+    $commitIds = $manifest.Branches.$BranchName.Commits | Select-Object -Last $Limit
+    [array]::Reverse($commitIds)
+    
+    foreach ($commitId in $commitIds) {
+        Get-VCSCommit -CommitId $commitId -RepositoryPath $RepositoryPath
+    }
+}
+```
+
+}
+
+function Restore-VCSCommitFiles {
+<#
+.SYNOPSIS
+Restores files from a commit to the working directory.
+
+```
+.DESCRIPTION
+Copies files from a commit snapshot back to the working directory.
+
+.PARAMETER CommitId
+The ID of the commit to restore from.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Restore-VCSCommitFiles -CommitId commit_000005
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)]
+    [Alias('Id')]
+    [string]$CommitId,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $commit = Get-VCSCommit -CommitId $CommitId -RepositoryPath $RepositoryPath
+    
+    if (-not $commit) {
+        return
+    }
+    
+    $commitPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "commits\$CommitId"
+    
+    foreach ($filePath in $commit.Files.PSObject.Properties.Name) {
+        $fileName = Split-Path -Path $filePath -Leaf
+        $sourcePath = Join-Path -Path $commitPath -ChildPath $fileName
+        
+        if (Test-Path -Path $sourcePath) {
+            if ($PSCmdlet.ShouldProcess($filePath, "Restore file")) {
+                Copy-Item -Path $sourcePath -Destination $filePath -Force
+            }
+        }
+    }
+}
+```
+
+}
+
+# ==============================================================================
+
+# BRANCH TOOLS
+
+# ==============================================================================
+
+function Get-VCSBranch {
+<#
+.SYNOPSIS
+Retrieves branch information.
+
+```
+.DESCRIPTION
+Lists branches or gets details about a specific branch.
+
+.PARAMETER Name
+The name of the branch to retrieve. If not specified, lists all branches.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Get-VCSBranch
+
+.EXAMPLE
+Get-VCSBranch -Name main
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [string]$Name,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    
+    if ($Name) {
+        if ($manifest.Branches.PSObject.Properties.Name -contains $Name) {
+            $branchData = $manifest.Branches.$Name
+            $output = [PSCustomObject]@{
+                Name = $Name
+                IsCurrent = ($Name -eq $manifest.CurrentBranch)
+                Head = $branchData.Head
+                CommitCount = $branchData.Commits.Count
+                Commits = $branchData.Commits
+            }
+            Write-Output -InputObject $output
+        } else {
+            Write-Error -Message "Branch not found: $Name" -ErrorAction Stop
+        }
+    } else {
+        foreach ($branchName in $manifest.Branches.PSObject.Properties.Name) {
+            $branchData = $manifest.Branches.$branchName
+            $output = [PSCustomObject]@{
+                Name = $branchName
+                IsCurrent = ($branchName -eq $manifest.CurrentBranch)
+                Head = $branchData.Head
+                CommitCount = $branchData.Commits.Count
+            }
+            Write-Output -InputObject $output
+        }
+    }
+}
+```
+
+}
+
+function New-VCSBranch {
+<#
+.SYNOPSIS
+Creates a new branch.
+
+```
+.DESCRIPTION
+Creates a new branch from the current branch HEAD.
+
+.PARAMETER Name
+The name of the new branch.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+New-VCSBranch -Name experimental
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    
+    if ($manifest.Branches.PSObject.Properties.Name -contains $Name) {
+        Write-Error -Message "Branch already exists: $Name" -ErrorAction Stop
+    }
+    
+    if ($PSCmdlet.ShouldProcess($Name, "Create branch")) {
+        $currentBranch = $manifest.Branches.($manifest.CurrentBranch)
+        
+        $manifest.Branches | Add-Member -NotePropertyName $Name -NotePropertyValue @{
+            Commits = @($currentBranch.Commits)
+            Head = $currentBranch.Head
+        }
+        
+        $manifest | Set-VCSManifest -RepositoryPath $RepositoryPath
+        
+        Get-VCSBranch -Name $Name -RepositoryPath $RepositoryPath
+    }
+}
+```
+
+}
+
+function Switch-VCSBranch {
+<#
+.SYNOPSIS
+Switches to a different branch.
+
+```
+.DESCRIPTION
+Changes the current branch and restores files from that branch's HEAD.
+
+.PARAMETER Name
+The name of the branch to switch to.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Switch-VCSBranch -Name experimental
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    
+    if ($manifest.Branches.PSObject.Properties.Name -notcontains $Name) {
+        Write-Error -Message "Branch not found: $Name" -ErrorAction Stop
+    }
+    
+    if ($PSCmdlet.ShouldProcess($Name, "Switch branch")) {
+        $head = $manifest.Branches.$Name.Head
+        
+        if ($head) {
+            Restore-VCSCommitFiles -CommitId $head -RepositoryPath $RepositoryPath -Confirm:$false
+        }
+        
+        $manifest.CurrentBranch = $Name
+        $manifest | Set-VCSManifest -RepositoryPath $RepositoryPath
+        
+        Get-VCSBranch -Name $Name -RepositoryPath $RepositoryPath
+    }
+}
+```
+
+}
+
+function Merge-VCSBranch {
+<#
+.SYNOPSIS
+Merges a branch into the current branch.
+
+```
+.DESCRIPTION
+Performs a fast-forward merge of the specified branch into the current branch.
+
+.PARAMETER SourceBranch
+The name of the branch to merge from.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Merge-VCSBranch -SourceBranch experimental
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$SourceBranch,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    $currentBranch = $manifest.CurrentBranch
+    
+    if ($manifest.Branches.PSObject.Properties.Name -notcontains $SourceBranch) {
+        Write-Error -Message "Branch not found: $SourceBranch" -ErrorAction Stop
+    }
+    
+    if ($SourceBranch -eq $currentBranch) {
+        Write-Error -Message "Cannot merge branch into itself" -ErrorAction Stop
+    }
+    
+    $sourceHead = $manifest.Branches.$SourceBranch.Head
+    $sourceCommits = $manifest.Branches.$SourceBranch.Commits
+    $currentCommits = $manifest.Branches.$currentBranch.Commits
+    
+    $newCommits = $sourceCommits | Where-Object -FilterScript { $_ -notin $currentCommits }
+    
+    if ($newCommits.Count -eq 0) {
+        Write-Warning -Message "Already up to date"
+        return
+    }
+    
+    if ($PSCmdlet.ShouldProcess("$SourceBranch into $currentBranch", "Merge branch")) {
+        $manifest.Branches.$currentBranch.Commits += $newCommits
+        $manifest.Branches.$currentBranch.Head = $sourceHead
+        
+        Restore-VCSCommitFiles -CommitId $sourceHead -RepositoryPath $RepositoryPath -Confirm:$false
+        
+        $manifest | Set-VCSManifest -RepositoryPath $RepositoryPath
+        
+        [PSCustomObject]@{
+            SourceBranch = $SourceBranch
+            TargetBranch = $currentBranch
+            CommitsMerged = $newCommits.Count
+            NewHead = $sourceHead
+        }
+    }
+}
+```
+
+}
+
+# ==============================================================================
+
+# DIFF AND STATUS TOOLS
+
+# ==============================================================================
+
+function Compare-VCSFile {
+<#
+.SYNOPSIS
+Compares a file to its committed version.
+
+```
+.DESCRIPTION
+Checks if a file has been modified since the last commit.
+
+.PARAMETER File
+The file to compare.
+
+.PARAMETER CommitId
+The commit to compare against. Defaults to HEAD.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Compare-VCSFile -File script.ps1
+
+.EXAMPLE
+Get-ChildItem -Filter *.ps1 | Compare-VCSFile
+#>
+[CmdletBinding()]
+[OutputType([PSCustomObject])]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+    [Alias('FullName')]
+    [string[]]$File,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$CommitId,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+begin {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    if (-not $CommitId) {
+        $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+        $CommitId = $manifest.Branches.($manifest.CurrentBranch).Head
+    }
+    
+    if (-not $CommitId) {
+        Write-Warning -Message "No commits yet"
+        return
+    }
+    
+    $commit = Get-VCSCommit -CommitId $CommitId -RepositoryPath $RepositoryPath
+}
+
+process {
+    foreach ($filePath in $File) {
+        if (Test-Path -Path $filePath) {
+            $resolvedPath = Resolve-Path -Path $filePath | Select-Object -ExpandProperty Path
+            $currentHash = Get-FileHash -Path $resolvedPath -Algorithm MD5 | Select-Object -ExpandProperty Hash
+            
+            $committedHash = $commit.Files.$resolvedPath
+            
+            $status = if ($committedHash -and ($currentHash -ne $committedHash)) {
+                "Modified"
+            } elseif (-not $committedHash) {
+                "Untracked"
+            } else {
+                "Unchanged"
+            }
+            
+            [PSCustomObject]@{
+                File = $resolvedPath
+                Status = $status
+                CurrentHash = $currentHash
+                CommittedHash = $committedHash
+            }
+        }
+    }
+}
+```
+
+}
+
+function Get-VCSStatus {
+<#
+.SYNOPSIS
+Shows repository status.
+
+```
+.DESCRIPTION
+Displays current branch, staged files, and working directory status.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+```
