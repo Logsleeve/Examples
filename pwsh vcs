@@ -981,8 +981,232 @@ Shows repository status.
 
 ```
 .DESCRIPTION
-Displays current branch, staged files, and working directory status.
+Displays current branch, staged files, and working directory status with color coding.
 
 .PARAMETER RepositoryPath
 The path to the .vcs repository folder.
+
+.EXAMPLE
+Get-VCSStatus
+
+.EXAMPLE
+Find-VCSRepository | Get-VCSStatus
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+process {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+    
+    # Display current branch
+    Write-Host "On branch: " -NoNewline
+    Write-Host $manifest.CurrentBranch -ForegroundColor Cyan
+    
+    # Get HEAD commit if exists
+    $head = $manifest.Branches.($manifest.CurrentBranch).Head
+    if ($head) {
+        $headCommit = Get-VCSCommit -CommitId $head -RepositoryPath $RepositoryPath
+        Write-Host "HEAD: " -NoNewline
+        Write-Host "$head" -ForegroundColor Yellow -NoNewline
+        Write-Host " - $($headCommit.Message)" -ForegroundColor Gray
+    } else {
+        Write-Host "No commits yet" -ForegroundColor Gray
+    }
+    
+    # Display staged files
+    $staging = Get-VCSStagingArea -RepositoryPath $RepositoryPath
+    
+    if ($staging.Files.Count -gt 0) {
+        Write-Host "`nChanges to be committed:" -ForegroundColor Green
+        Write-Host "  (use Clear-VCSStagingArea to unstage)" -ForegroundColor Gray
+        Write-Host ""
+        
+        foreach ($filePath in $staging.Files) {
+            $fileName = Split-Path -Path $filePath -Leaf
+            Write-Host "        modified:   " -ForegroundColor Green -NoNewline
+            Write-Host $fileName
+        }
+    } else {
+        Write-Host "`nNo changes staged for commit" -ForegroundColor Gray
+    }
+    
+    # Display working directory changes (if HEAD exists)
+    if ($head) {
+        Write-Host "`nChanges not staged for commit:" -ForegroundColor Yellow
+        Write-Host "  (use Add-VCSFileToStaging to stage files)" -ForegroundColor Gray
+        Write-Host ""
+        
+        # Check all files that were in the last commit
+        $changedFiles = [System.Collections.Generic.List[PSCustomObject]]::new()
+        
+        foreach ($filePath in $headCommit.Files.PSObject.Properties.Name) {
+            if (Test-Path -Path $filePath) {
+                $comparison = Compare-VCSFile -File $filePath -CommitId $head -RepositoryPath $RepositoryPath
+                
+                if ($comparison.Status -eq "Modified" -and $filePath -notin $staging.Files) {
+                    $changedFiles.Add($comparison)
+                }
+            }
+        }
+        
+        if ($changedFiles.Count -gt 0) {
+            foreach ($change in $changedFiles) {
+                $fileName = Split-Path -Path $change.File -Leaf
+                Write-Host "        modified:   " -ForegroundColor Red -NoNewline
+                Write-Host $fileName
+            }
+        } else {
+            Write-Host "  (no unstaged changes)" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host ""
+}
 ```
+
+}
+
+
+function Show-VCSFileDiff {
+<#
+.SYNOPSIS
+Shows detailed line-by-line differences between current and committed file versions.
+
+```
+.DESCRIPTION
+Displays the actual content differences between a file and its committed version,
+similar to 'git diff'. Shows lines that were added, removed, or changed.
+
+.PARAMETER File
+The file to show differences for.
+
+.PARAMETER CommitId
+The commit to compare against. Defaults to HEAD.
+
+.PARAMETER ContextLines
+Number of context lines to show around changes.
+
+.PARAMETER RepositoryPath
+The path to the .vcs repository folder.
+
+.EXAMPLE
+Show-VCSFileDiff -File script.ps1
+
+.EXAMPLE
+Show-VCSFileDiff -File script.ps1 -CommitId commit_000003
+
+.EXAMPLE
+Get-ChildItem -Filter *.ps1 | Show-VCSFileDiff
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+    [Alias('FullName')]
+    [string]$File,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$CommitId,
+    
+    [Parameter(Mandatory = $false)]
+    [int]$ContextLines = 3,
+    
+    [Parameter(Mandatory = $false)]
+    [System.IO.DirectoryInfo]$RepositoryPath
+)
+
+begin {
+    if (-not $RepositoryPath) {
+        $RepositoryPath = Find-VCSRepository
+    }
+    
+    if (-not $CommitId) {
+        $manifest = Get-VCSManifest -RepositoryPath $RepositoryPath
+        $CommitId = $manifest.Branches.($manifest.CurrentBranch).Head
+    }
+    
+    if (-not $CommitId) {
+        Write-Warning -Message "No commits yet"
+        return
+    }
+}
+
+process {
+    if (-not (Test-Path -Path $File)) {
+        Write-Warning -Message "File not found: $File"
+        return
+    }
+    
+    $resolvedPath = Resolve-Path -Path $File | Select-Object -ExpandProperty Path
+    $fileName = Split-Path -Path $resolvedPath -Leaf
+    
+    # Get committed version
+    $commitPath = Join-Path -Path $RepositoryPath.FullName -ChildPath "commits\$CommitId"
+    $committedFilePath = Join-Path -Path $commitPath -ChildPath $fileName
+    
+    if (-not (Test-Path -Path $committedFilePath)) {
+        Write-Host "File not in commit: " -ForegroundColor Yellow -NoNewline
+        Write-Host $fileName -ForegroundColor White
+        Write-Host "Status: Untracked" -ForegroundColor Cyan
+        return
+    }
+    
+    # Check if file has changed
+    $comparison = Compare-VCSFile -File $resolvedPath -CommitId $CommitId -RepositoryPath $RepositoryPath
+    
+    if ($comparison.Status -eq "Unchanged") {
+        Write-Host "No changes in: " -ForegroundColor Gray -NoNewline
+        Write-Host $fileName
+        return
+    }
+    
+    # Read file contents
+    $committedContent = Get-Content -Path $committedFilePath
+    $currentContent = Get-Content -Path $resolvedPath
+    
+    # Display header
+    Write-Host "`ndiff --vcs a/$fileName b/$fileName" -ForegroundColor White
+    Write-Host "--- a/$fileName" -ForegroundColor Red
+    Write-Host "+++ b/$fileName" -ForegroundColor Green
+    Write-Host "Commit: $CommitId" -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Simple line-by-line comparison
+    $maxLines = [Math]::Max($committedContent.Count, $currentContent.Count)
+    
+    for ($i = 0; $i -lt $maxLines; $i++) {
+        $lineNum = $i + 1
+        $oldLine = if ($i -lt $committedContent.Count) { $committedContent[$i] } else { $null }
+        $newLine = if ($i -lt $currentContent.Count) { $currentContent[$i] } else { $null }
+        
+        if ($oldLine -ne $newLine) {
+            Write-Host "@@ Line $lineNum @@" -ForegroundColor Cyan
+            
+            if ($null -ne $oldLine) {
+                Write-Host "- $oldLine" -ForegroundColor Red
+            }
+            if ($null -ne $newLine) {
+                Write-Host "+ $newLine" -ForegroundColor Green
+            }
+        }
+    }
+    
+    Write-Host ""
+    
+    # Summary
+    $addedLines = ($currentContent.Count - $committedContent.Count)
+    if ($addedLines -gt 0) {
+        Write-Host "+$addedLines lines added" -ForegroundColor Green
+    } elseif ($addedLines -lt 0) {
+        Write-Host "$addedLines lines removed" -ForegroundColor Red
+    }
+}
+```
+
+}
