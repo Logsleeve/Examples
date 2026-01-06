@@ -1,0 +1,112 @@
+function Add-VcsBlobAds {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [string[]] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Message,
+
+        [string] $Author = $env:USERNAME
+    )
+
+    begin {
+        $vcsRoot = Join-Path (Get-Location) ".vcs"
+        $blobRoot = Join-Path $vcsRoot "blobs"
+        New-Item -ItemType Directory -Force -Path $blobRoot | Out-Null
+    }
+
+    process {
+        foreach ($p in $Path) {
+            $item = Get-Item $p -ErrorAction Stop
+            $hash = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLower()
+
+            $destPath = Join-Path $blobRoot $hash
+            Move-Item $item.FullName $destPath -Force
+
+            $meta = @{
+                Schema       = "vcs.blob.v1"
+                BlobHash     = $hash
+                Algorithm    = "SHA256"
+                OriginalPath = $p
+                FileName     = $item.Name
+                Size         = $item.Length
+                CreatedUtc   = (Get-Date).ToUniversalTime().ToString("o")
+                Author       = $Author
+                Message      = $Message
+                Encoding     = "utf8"
+                LineEndings  = "LF"
+            }
+
+            $meta |
+                ConvertTo-Json -Depth 3 |
+                Set-Content -Path "$destPath:blob.meta.json" -Encoding UTF8
+        }
+    }
+}
+
+
+
+.vcs/
+└── blobs/
+    └── a3f91d2...
+        ├── (file content)
+        └── ADS: blob.meta.json
+
+
+
+function Add-VcsBlobSidecar {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [string[]] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Message,
+
+        [string] $Author = $env:USERNAME
+    )
+
+    begin {
+        $vcsRoot = Join-Path (Get-Location) ".vcs"
+        $blobRoot = Join-Path $vcsRoot "blobs"
+        New-Item -ItemType Directory -Force -Path $blobRoot | Out-Null
+    }
+
+    process {
+        foreach ($p in $Path) {
+            $item = Get-Item $p -ErrorAction Stop
+            $hash = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLower()
+
+            $destPath = Join-Path $blobRoot $hash
+            Move-Item $item.FullName $destPath -Force
+
+            $meta = @{
+                Schema       = "vcs.blob.v1"
+                BlobHash     = $hash
+                Algorithm    = "SHA256"
+                OriginalPath = $p
+                FileName     = $item.Name
+                Size         = $item.Length
+                CreatedUtc   = (Get-Date).ToUniversalTime().ToString("o")
+                Author       = $Author
+                Message      = $Message
+                Encoding     = "utf8"
+                LineEndings  = "LF"
+            }
+
+            $meta |
+                ConvertTo-Json -Depth 3 |
+                Set-Content -Path "$destPath.meta.json" -Encoding UTF8
+        }
+    }
+}
+
+
+
+.vcs/
+└── blobs/
+    ├── a3f91d2...
+    └── a3f91d2....meta.json
+
+
