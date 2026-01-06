@@ -1,0 +1,107 @@
+I work for an employer and do not have any admin privileges nor ability to install software and packages on my own. Putting in a request for software is out of the question. 
+
+I do luckily have VSCode
+
+I have been working on powershell scripts for various tasks. Some are advanced and I need AI to help get them up and running. 
+
+My issue: 
+-No GIT access
+-No version control
+-have lost hours of time by messing up a script an not being able to rollback
+-constantly editing scripts 
+
+Current workflow:
+-I will make a script then save it and run it
+-I get an error or want to improve it and paste script to our work AI
+-AI rewrites the script
+-sometimes the changes are amazing, sometimes after awhile of iteration, AI loses context and the script deteriorates rapidly
+-currently have been using file name versioning (script_v1.ps1, script_v2.ps1, etc)
+-sometimes change the names of my scripts since I can’t make branches 
+-picking up after a few days or weeks off working on the scripts is impossible so I have a lot of dead in the water projects
+
+Challenge:
+-using powershell and/or office 365 products (excel, access) how can I replicate the main function of git?
+
+Goal:
+-use single files, not file version names
+-make adds and commits
+-make branches 
+-merge branches
+-rollback
+-see version differences 
+
+
+How can I replicate the basic functionality of git using local computer files/directories using powershell and, if value added, Microsoft access?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+I don't want a single module, instead i would rather you follow the following design principles:
+
+
+
+Commands (functions, cmdlets) designed to do one thing well. They accept input via parameters and output through the pipeline. The goal is reusability and context-independence, meaning a tool should not concern itself with how data is sourced or finally formatted.  
+
+
+Controllers: These are scripts that coordinate multiple tools to accomplish a specific business process or task. Controllers contain the logic that connects tools but do not perform the actual work themselves. They decide where input comes from and where output goes.  
+  
+This design philosophy aims to:  
+-Ease testing and debugging by breaking down complex tasks into smaller, manageable units.  
+-Maximize reusability of individual tools across different scenarios.  
+-Minimize programming effort by leveraging PowerShell's native capabilities and existing command patterns.  
+  
+  
+    
+
+Aliases: While useful in the console, aliases like `gci` or `?` make scripts unreadable and unmaintainable. Full command names should be used for clarity, leveraging tab-completion.  
+
+Positional Parameters: Avoid relying on positional parameters as they obscure the purpose of the arguments. Using full parameter names, despite taking more screen space, greatly enhances readability.  
+
+Creating Objects: Old methods like `New-Object PSObject` and `Add-Member` are slow and less readable. The recommended approach is to use `[PSCustomObject]` with a hash table, which is faster and more flexible.  
+
+Scopes (Global Variables): Using global scope (`$global:`) is generally bad practice because it can lead to unexpected behavior if users change variables outside the script. Script scope (`$script:`) within modules is presented as a better alternative for persistent variables within a module's context.  
+
+Magic Function Variables: Directly referencing variables from parent scopes without passing them as parameters (`$name` without being a parameter) is prone to errors if the variable changes.  
+
+Parameters: Explicitly defining parameters for functions is crucial for maintainability, reusability, and clarity.  
+
+Naming Things: Using short, cryptic variable names (e.g., `$V`, `$i`) or Hungarian notation (`$strName`) makes code difficult to read. PascalCase or camelCase for variable names, following .NET conventions, is recommended for improved readability.  
+
+Backticks: Backticks for line continuation are highly discouraged due to their invisibility and tendency to break with extra spaces. Alternatives include splatting parameters and placing pipes or logical operators (`-and`, `-or`) at the end of lines for continuation.  
+
+Outputting to the Pipeline: Avoid using `Format-Table` or `Format-List` inside functions before piping to `Export-CSV` or other cmdlets, as this breaks the object structure. Instead, format output outside the function and select only the properties you need.  
+
+Collections (`+=`): Appending to arrays with `+=` is inefficient for large collections because it creates a new array each time. Instead, let PowerShell build the array by putting objects directly into the pipeline within a loop or use generic lists (`[System.Collections.Generic.List[PSObject]]`) for better performance and dynamic sizing.  
+
+For Loops: Traditional `for` loops, while having their place for exact iterations, are often less "PowerShelly" and can lead to complex code.  
+
+ForEach: `ForEach-Object` and the `.ForEach()` method (PowerShell 4+) are preferred for iterating over collections due to their readability, efficiency, and dynamic handling of collection sizes.  
+
+Throwing Errors: Directly using `throw` can be affected by `$ErrorActionPreference`. It's better to use `Write-Error -ErrorAction Stop` or `PSCmdlet.ThrowTerminatingError()` to ensure errors are truly terminating, regardless of user preferences.  
+
+WMI vs. CIM: `Get-WmiObject` is older and less performant than `Get-CimInstance` (PowerShell 3+). `Get-CimInstance` offers better performance and a broader range of options.  
+
+Read-Host vs. Parameters: While `Read-Host` can be used for user input, using parameters with `[Parameter(Mandatory=$true)]` is the preferred and more standard way to get input for functions.  
+
+Parameter Sets: Using `[Parameter(ParameterSetName='Name')]` allows functions to have different sets of parameters based on the desired operation, making them more flexible.  
+
+WhatIf and Confirm: Instead of writing custom logic for "WhatIf" and "Confirm" functionality, use `[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]`. This automatically enables `-WhatIf` and `-Confirm` parameters, providing consistent behavior and leveraging PowerShell's built-in capabilities.  
+
+Switches vs. Booleans: For parameters that are simply on/off, use `[Switch]` instead of `[bool]`. Switches are more idiomatic PowerShell and clearer to the user.  
+
+Output Types / Data Pollution: Avoid accidentally dumping different object types or strings into the pipeline from a function. Capture output and construct useful, consistent objects to return. `Write-Host` is suitable for messages not intended for the pipeline (before PowerShell 5, careful with this).  
+
+Parameter Types (File Info): Instead of taking a string path, use `[System.IO.FileInfo]` as a parameter type. This allows PowerShell to validate the path and accept pipeline input from `Get-ChildItem`.  
+
+ 
