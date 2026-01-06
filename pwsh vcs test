@@ -752,5 +752,279 @@ Test-Assertion -TestName "Non-existent file handled gracefully" -Condition {
     $true # Should just warn, not error
 } -FailureMessage "Non-existent file caused error"
 
+# Write-TestStep "Test getting non-existent commit"
+# $nonExistentCommit = Get-VCSCommit -CommitId "commit_999999" -WarningAction Silent
+
 Write-TestStep "Test getting non-existent commit"
-$nonExistentCommit = Get-VCSCommit -CommitId "commit_999999" -WarningAction Silent
+$nonExistentCommit = Get-VCSCommit -CommitId "commit_999999" -WarningAction SilentlyContinue
+
+Test-Assertion -TestName "Non-existent commit handled gracefully" -Condition {
+    $null -eq $nonExistentCommit
+} -FailureMessage "Non-existent commit should return null"
+
+Write-TestStep "Test switching to non-existent branch"
+try {
+    Switch-VCSBranch -Name "nonexistent-branch" -ErrorAction Stop -Confirm:$false
+    $badSwitchPrevented = $false
+} catch {
+    $badSwitchPrevented = $true
+}
+
+Test-Assertion -TestName "Invalid branch switch prevented" -Condition {
+    $badSwitchPrevented
+} -FailureMessage "Switch to non-existent branch was allowed"
+
+Write-TestStep "Test merging non-existent branch"
+try {
+    Merge-VCSBranch -SourceBranch "nonexistent-branch" -ErrorAction Stop -Confirm:$false
+    $badMergePrevented = $false
+} catch {
+    $badMergePrevented = $true
+}
+
+Test-Assertion -TestName "Invalid branch merge prevented" -Condition {
+    $badMergePrevented
+} -FailureMessage "Merge of non-existent branch was allowed"
+
+Write-TestStep "Test merging branch into itself"
+try {
+    Merge-VCSBranch -SourceBranch "main" -ErrorAction Stop -Confirm:$false
+    $selfMergePrevented = $false
+} catch {
+    $selfMergePrevented = $true
+}
+
+Test-Assertion -TestName "Self-merge prevented" -Condition {
+    $selfMergePrevented
+} -FailureMessage "Branch was allowed to merge into itself"
+
+# ==============================================================================
+# TEST 15: PIPELINE SUPPORT
+# ==============================================================================
+
+Write-TestHeader "TEST 15: Pipeline Support"
+
+Write-TestStep "Test pipeline input for Add-VCSFileToStaging"
+$pipelineFiles = Get-ChildItem -Filter "*.ps1" | Add-VCSFileToStaging
+
+Test-Assertion -TestName "Pipeline input works for staging" -Condition {
+    $pipelineFiles.Files.Count -ge 3
+} -FailureMessage "Pipeline input to Add-VCSFileToStaging failed"
+
+Clear-VCSStagingArea -Confirm:$false
+
+Write-TestStep "Test pipeline for Compare-VCSFile"
+$pipelineComparisons = Get-ChildItem -Filter "*.ps1" | Compare-VCSFile
+
+Test-Assertion -TestName "Pipeline input works for comparison" -Condition {
+    $pipelineComparisons.Count -ge 3
+} -FailureMessage "Pipeline input to Compare-VCSFile failed"
+
+Write-TestStep "Test pipeline for Get-VCSCommit"
+$manifest = Get-VCSManifest
+$pipelineCommits = $manifest.Branches.main.Commits | Get-VCSCommit
+
+Test-Assertion -TestName "Pipeline input works for Get-VCSCommit" -Condition {
+    $pipelineCommits.Count -ge 2
+} -FailureMessage "Pipeline input to Get-VCSCommit failed"
+
+# ==============================================================================
+# TEST 16: REPOSITORY FROM SUBDIRECTORY
+# ==============================================================================
+
+Write-TestHeader "TEST 16: Repository Operations from Subdirectory"
+
+Write-TestStep "Create and navigate to subdirectory"
+New-Item -ItemType Directory -Path "deep\nested\path" -Force | Out-Null
+Set-Location -Path "deep\nested\path"
+
+Write-TestStep "Find repository from deep subdirectory"
+$repoFromDeep = Find-VCSRepository
+
+Test-Assertion -TestName "Repository found from nested directory" -Condition {
+    $null -ne $repoFromDeep
+} -FailureMessage "Repository not found from nested directory"
+
+Write-TestStep "Get status from subdirectory"
+Get-VCSStatus
+
+Test-Assertion -TestName "Status works from subdirectory" -Condition {
+    $true
+} -FailureMessage "Get-VCSStatus failed from subdirectory"
+
+Write-TestStep "Get manifest from subdirectory"
+$manifestFromDeep = Get-VCSManifest
+
+Test-Assertion -TestName "Manifest retrieved from subdirectory" -Condition {
+    $null -ne $manifestFromDeep
+} -FailureMessage "Could not get manifest from subdirectory"
+
+Set-Location -Path "..\..\..\"
+
+# ==============================================================================
+# TEST 17: MULTIPLE COMMITS AND HISTORY
+# ==============================================================================
+
+Write-TestHeader "TEST 17: Multiple Commits and History Tracking"
+
+Write-TestStep "Create series of commits"
+for ($i = 4; $i -le 8; $i++) {
+    $fileName = "batch_script_$i.ps1"
+    Set-Content -Path $fileName -Value "# Batch script $i`nWrite-Host 'Script $i'"
+    Add-VCSFileToStaging -File $fileName | Out-Null
+    New-VCSCommit -Message "Batch commit $i" | Out-Null
+}
+
+Write-TestStep "Verify all commits created"
+$allHistory = Get-VCSCommitHistory -Limit 20
+
+Test-Assertion -TestName "All commits in history" -Condition {
+    $allHistory.Count -ge 8
+} -FailureMessage "Not all commits found in history"
+
+Write-TestStep "Test history limit"
+$limitedHistory = Get-VCSCommitHistory -Limit 3
+
+Test-Assertion -TestName "History limit works correctly" -Condition {
+    $limitedHistory.Count -eq 3
+} -FailureMessage "History limit not working"
+
+Test-Assertion -TestName "Most recent commits returned first" -Condition {
+    $limitedHistory[0].Message -like "*Batch commit 8*"
+} -FailureMessage "History not ordered correctly"
+
+# ==============================================================================
+# TEST 18: FILE HASH INTEGRITY
+# ==============================================================================
+
+Write-TestHeader "TEST 18: File Hash Integrity"
+
+Write-TestStep "Create and commit a file"
+Set-Content -Path "hash_test.ps1" -Value "Original content"
+Add-VCSFileToStaging -File "hash_test.ps1" | Out-Null
+$hashCommit = New-VCSCommit -Message "Hash test commit"
+
+Write-TestStep "Verify hash stored"
+$storedHash = $hashCommit.Files[(Resolve-Path "hash_test.ps1").Path]
+
+Test-Assertion -TestName "File hash stored in commit" -Condition {
+    $null -ne $storedHash
+} -FailureMessage "File hash not stored"
+
+Write-TestStep "Modify file and verify hash changes"
+Set-Content -Path "hash_test.ps1" -Value "Modified content"
+$newHash = Get-FileHash -Path "hash_test.ps1" -Algorithm MD5 | Select-Object -ExpandProperty Hash
+
+Test-Assertion -TestName "Hash changes when file modified" -Condition {
+    $newHash -ne $storedHash
+} -FailureMessage "Hash did not change after modification"
+
+Write-TestStep "Restore file and verify hash matches"
+Restore-VCSCommitFiles -CommitId $hashCommit.Id -Confirm:$false
+$restoredHash = Get-FileHash -Path "hash_test.ps1" -Algorithm MD5 | Select-Object -ExpandProperty Hash
+
+Test-Assertion -TestName "Restored file hash matches original" -Condition {
+    $restoredHash -eq $storedHash
+} -FailureMessage "Restored file hash does not match original"
+
+# ==============================================================================
+# TEST 19: COMMIT PARENT TRACKING
+# ==============================================================================
+
+Write-TestHeader "TEST 19: Commit Parent Tracking"
+
+Write-TestStep "Verify first commit has no parent"
+$firstCommit = Get-VCSCommit -CommitId "commit_000000"
+
+Test-Assertion -TestName "First commit has null parent" -Condition {
+    $null -eq $firstCommit.Parent
+} -FailureMessage "First commit should have no parent"
+
+Write-TestStep "Verify subsequent commits have parents"
+$secondCommit = Get-VCSCommit -CommitId "commit_000001"
+
+Test-Assertion -TestName "Second commit has parent" -Condition {
+    $secondCommit.Parent -eq "commit_000000"
+} -FailureMessage "Second commit missing parent reference"
+
+Write-TestStep "Verify parent chain is continuous"
+$allCommits = Get-VCSCommitHistory -Limit 50
+$parentChainValid = $true
+
+for ($i = 0; $i -lt ($allCommits.Count - 1); $i++) {
+    $currentCommit = $allCommits[$i]
+    $expectedParent = $allCommits[$i + 1].Id
+    
+    if ($currentCommit.Parent -ne $expectedParent) {
+        $parentChainValid = $false
+        break
+    }
+}
+
+Test-Assertion -TestName "Parent chain is continuous" -Condition {
+    $parentChainValid
+} -FailureMessage "Parent chain is broken"
+
+# ==============================================================================
+# TEST 20: WHATIF AND CONFIRM SUPPORT
+# ==============================================================================
+
+Write-TestHeader "TEST 20: WhatIf and Confirm Support"
+
+Write-TestStep "Test WhatIf on Initialize-VCSRepository"
+Set-Location -Path ".."
+New-Item -ItemType Directory -Path "whatif_test" -Force | Out-Null
+Set-Location -Path "whatif_test"
+
+Initialize-VCSRepository -WhatIf
+
+Test-Assertion -TestName "WhatIf prevents repository creation" -Condition {
+    -not (Test-Path -Path ".vcs")
+} -FailureMessage "WhatIf did not prevent action"
+
+Set-Location -Path "..\test_directory"
+
+Write-TestStep "Test WhatIf on New-VCSCommit"
+Set-Content -Path "whatif_file.ps1" -Value "# WhatIf test"
+Add-VCSFileToStaging -File "whatif_file.ps1" | Out-Null
+
+$commitCountBefore = (Get-VCSManifest).CommitCounter
+New-VCSCommit -Message "WhatIf commit" -WhatIf
+$commitCountAfter = (Get-VCSManifest).CommitCounter
+
+Test-Assertion -TestName "WhatIf prevents commit" -Condition {
+    $commitCountBefore -eq $commitCountAfter
+} -FailureMessage "WhatIf did not prevent commit"
+
+# Clean up staging
+Clear-VCSStagingArea -Confirm:$false
+
+# ==============================================================================
+# CLEANUP AND SUMMARY
+# ==============================================================================
+
+Write-TestHeader "CLEANUP"
+
+Write-TestStep "Return to original directory"
+Set-Location -Path $originalLocation
+
+Write-TestStep "Clean up test directory (optional)"
+# Uncomment the next line if you want automatic cleanup
+# Remove-Item -Path $TestDirectory -Recurse -Force
+
+Write-Host "Test directory preserved at: $TestDirectory" -ForegroundColor Cyan
+Write-Host "To clean up manually, run: Remove-Item -Path '$TestDirectory' -Recurse -Force" -ForegroundColor Gray
+
+# ==============================================================================
+# FINAL SUMMARY
+# ==============================================================================
+
+Write-TestSummary
+
+# Export results
+$resultsPath = Join-Path -Path $originalLocation -ChildPath "vcs_test_results.json"
+$script:TestResults | ConvertTo-Json -Depth 5 | Set-Content -Path $resultsPath
+Write-Host "Test results exported to: $resultsPath" -ForegroundColor Cyan
+
+# Return test results
+return $script:TestResults
