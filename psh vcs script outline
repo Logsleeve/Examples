@@ -1,0 +1,499 @@
+# VersionControl.psm1 - A Git-like version control system in pure PowerShell
+
+# No installation required - just import this module
+
+# Initialize repository
+
+function Initialize-VCS {
+[CmdletBinding()]
+param(
+[string]$Path = (Get-Location)
+)
+
+```
+$vcsPath = Join-Path $Path ".vcs"
+if (Test-Path $vcsPath) {
+    Write-Warning "Repository already initialized at $Path"
+    return
+}
+
+# Create repository structure
+New-Item -ItemType Directory -Path $vcsPath -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $vcsPath "commits") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $vcsPath "branches") -Force | Out-Null
+
+# Initialize manifest
+$manifest = @{
+    currentBranch = "main"
+    branches = @{
+        main = @{
+            commits = @()
+            head = $null
+        }
+    }
+    commitCounter = 0
+}
+
+$manifest | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $vcsPath "manifest.json")
+
+# Mark as hidden
+(Get-Item $vcsPath).Attributes = 'Hidden'
+
+Write-Host "Initialized empty VCS repository in $vcsPath" -ForegroundColor Green
+```
+
+}
+
+# Get repository path
+
+function Get-VCSPath {
+$current = Get-Location
+while ($current) {
+$vcsPath = Join-Path $current “.vcs”
+if (Test-Path $vcsPath) {
+return $vcsPath
+}
+$parent = Split-Path $current -Parent
+if ($parent -eq $current) { break }
+$current = $parent
+}
+throw “Not a VCS repository (or any parent up to mount point)”
+}
+
+# Get manifest
+
+function Get-VCSManifest {
+$vcsPath = Get-VCSPath
+$manifestPath = Join-Path $vcsPath “manifest.json”
+return Get-Content $manifestPath | ConvertFrom-Json
+}
+
+# Save manifest
+
+function Save-VCSManifest {
+param($Manifest)
+$vcsPath = Get-VCSPath
+$manifestPath = Join-Path $vcsPath “manifest.json”
+$Manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath
+}
+
+# Add files to staging
+
+function Add-VCSFile {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string[]]$Files
+)
+
+```
+$vcsPath = Get-VCSPath
+$stagingPath = Join-Path $vcsPath "staging.json"
+
+$staging = if (Test-Path $stagingPath) {
+    Get-Content $stagingPath | ConvertFrom-Json
+} else {
+    @{ files = @() }
+}
+
+foreach ($file in $Files) {
+    if ($file -eq "." -or $file -eq "*") {
+        # Add all ps1 files in current directory
+        $allFiles = Get-ChildItem -Filter "*.ps1" | Select-Object -ExpandProperty Name
+        $staging.files = @($staging.files + $allFiles | Select-Object -Unique)
+    } else {
+        if (Test-Path $file) {
+            $staging.files = @($staging.files + $file | Select-Object -Unique)
+        } else {
+            Write-Warning "File not found: $file"
+        }
+    }
+}
+
+$staging | ConvertTo-Json | Set-Content $stagingPath
+Write-Host "Added $($staging.files.Count) file(s) to staging" -ForegroundColor Green
+```
+
+}
+
+# Commit changes
+
+function New-VCSCommit {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$Message
+)
+
+```
+$vcsPath = Get-VCSPath
+$stagingPath = Join-Path $vcsPath "staging.json"
+
+if (-not (Test-Path $stagingPath)) {
+    Write-Warning "No files staged for commit. Use Add-VCSFile first."
+    return
+}
+
+$staging = Get-Content $stagingPath | ConvertFrom-Json
+if ($staging.files.Count -eq 0) {
+    Write-Warning "No files staged for commit."
+    return
+}
+
+$manifest = Get-VCSManifest
+$commitId = "commit_" + $manifest.commitCounter.ToString("D6")
+$manifest.commitCounter++
+
+# Create commit directory
+$commitPath = Join-Path $vcsPath "commits\$commitId"
+New-Item -ItemType Directory -Path $commitPath -Force | Out-Null
+
+# Copy files to commit
+$commitFiles = @{}
+foreach ($file in $staging.files) {
+    if (Test-Path $file) {
+        $destPath = Join-Path $commitPath (Split-Path $file -Leaf)
+        Copy-Item $file $destPath
+        $commitFiles[$file] = Get-FileHash $file -Algorithm MD5 | Select-Object -ExpandProperty Hash
+    }
+}
+
+# Create commit metadata
+$commitData = @{
+    id = $commitId
+    message = $Message
+    timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    branch = $manifest.currentBranch
+    files = $commitFiles
+    parent = $manifest.branches[$manifest.currentBranch].head
+}
+
+$commitData | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $commitPath "commit.json")
+
+# Update branch
+$manifest.branches[$manifest.currentBranch].commits += $commitId
+$manifest.branches[$manifest.currentBranch].head = $commitId
+
+Save-VCSManifest $manifest
+
+# Clear staging
+Remove-Item $stagingPath
+
+Write-Host "[$manifest.currentBranch $commitId] $Message" -ForegroundColor Green
+Write-Host "$($commitFiles.Count) file(s) committed" -ForegroundColor Gray
+```
+
+}
+
+# Show status
+
+function Get-VCSStatus {
+$vcsPath = Get-VCSPath
+$manifest = Get-VCSManifest
+
+```
+Write-Host "On branch: " -NoNewline
+Write-Host $manifest.currentBranch -ForegroundColor Cyan
+
+$stagingPath = Join-Path $vcsPath "staging.json"
+if (Test-Path $stagingPath) {
+    $staging = Get-Content $stagingPath | ConvertFrom-Json
+    if ($staging.files.Count -gt 0) {
+        Write-Host "`nStaged files:" -ForegroundColor Green
+        foreach ($file in $staging.files) {
+            Write-Host "  $file" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Host "`nNo files staged for commit" -ForegroundColor Gray
+}
+```
+
+}
+
+# Show commit log
+
+function Get-VCSLog {
+[CmdletBinding()]
+param(
+[int]$Limit = 10
+)
+
+```
+$vcsPath = Get-VCSPath
+$manifest = Get-VCSManifest
+$branch = $manifest.currentBranch
+
+$commits = $manifest.branches[$branch].commits | Select-Object -Last $Limit
+[array]::Reverse($commits)
+
+foreach ($commitId in $commits) {
+    $commitPath = Join-Path $vcsPath "commits\$commitId\commit.json"
+    $commit = Get-Content $commitPath | ConvertFrom-Json
+    
+    Write-Host "commit " -NoNewline -ForegroundColor Yellow
+    Write-Host $commit.id -ForegroundColor Yellow
+    Write-Host "Date:   $($commit.timestamp)"
+    Write-Host "`n    $($commit.message)`n"
+}
+```
+
+}
+
+# Create new branch
+
+function New-VCSBranch {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$Name
+)
+
+```
+$manifest = Get-VCSManifest
+
+if ($manifest.branches.PSObject.Properties.Name -contains $Name) {
+    Write-Warning "Branch '$Name' already exists"
+    return
+}
+
+# Create branch from current HEAD
+$currentBranch = $manifest.branches[$manifest.currentBranch]
+$manifest.branches | Add-Member -NotePropertyName $Name -NotePropertyValue @{
+    commits = @($currentBranch.commits)
+    head = $currentBranch.head
+}
+
+Save-VCSManifest $manifest
+Write-Host "Created branch: $Name" -ForegroundColor Green
+```
+
+}
+
+# Switch branch
+
+function Switch-VCSBranch {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$Name
+)
+
+```
+$manifest = Get-VCSManifest
+
+if ($manifest.branches.PSObject.Properties.Name -notcontains $Name) {
+    Write-Warning "Branch '$Name' does not exist"
+    return
+}
+
+# Checkout files from branch HEAD
+$head = $manifest.branches[$Name].head
+if ($head) {
+    Restore-VCSCommit -CommitId $head -NoMessage
+}
+
+$manifest.currentBranch = $Name
+Save-VCSManifest $manifest
+
+Write-Host "Switched to branch: $Name" -ForegroundColor Green
+```
+
+}
+
+# List branches
+
+function Get-VCSBranch {
+$manifest = Get-VCSManifest
+
+```
+foreach ($branch in $manifest.branches.PSObject.Properties.Name) {
+    if ($branch -eq $manifest.currentBranch) {
+        Write-Host "* " -NoNewline -ForegroundColor Green
+        Write-Host $branch -ForegroundColor Green
+    } else {
+        Write-Host "  $branch"
+    }
+}
+```
+
+}
+
+# Restore files from commit
+
+function Restore-VCSCommit {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$CommitId,
+[switch]$NoMessage
+)
+
+```
+$vcsPath = Get-VCSPath
+$commitPath = Join-Path $vcsPath "commits\$CommitId"
+
+if (-not (Test-Path $commitPath)) {
+    Write-Warning "Commit not found: $CommitId"
+    return
+}
+
+$commitData = Get-Content (Join-Path $commitPath "commit.json") | ConvertFrom-Json
+
+foreach ($file in $commitData.files.PSObject.Properties.Name) {
+    $sourcePath = Join-Path $commitPath (Split-Path $file -Leaf)
+    if (Test-Path $sourcePath) {
+        Copy-Item $sourcePath $file -Force
+    }
+}
+
+if (-not $NoMessage) {
+    Write-Host "Restored files from commit: $CommitId" -ForegroundColor Green
+}
+```
+
+}
+
+# Checkout specific commit (rollback)
+
+function Invoke-VCSCheckout {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$CommitId
+)
+
+```
+Restore-VCSCommit -CommitId $CommitId
+Write-Host "HEAD is now at $CommitId" -ForegroundColor Yellow
+```
+
+}
+
+# Show diff between current files and last commit
+
+function Get-VCSDiff {
+[CmdletBinding()]
+param(
+[string]$File
+)
+
+```
+$vcsPath = Get-VCSPath
+$manifest = Get-VCSManifest
+$head = $manifest.branches[$manifest.currentBranch].head
+
+if (-not $head) {
+    Write-Warning "No commits yet"
+    return
+}
+
+$commitPath = Join-Path $vcsPath "commits\$head"
+$commitData = Get-Content (Join-Path $commitPath "commit.json") | ConvertFrom-Json
+
+$filesToCheck = if ($File) { @($File) } else { $commitData.files.PSObject.Properties.Name }
+
+foreach ($fileName in $filesToCheck) {
+    if (Test-Path $fileName) {
+        $currentHash = Get-FileHash $fileName -Algorithm MD5 | Select-Object -ExpandProperty Hash
+        $committedHash = $commitData.files.$fileName
+        
+        if ($currentHash -ne $committedHash) {
+            Write-Host "`nFile: $fileName" -ForegroundColor Cyan
+            Write-Host "Status: Modified" -ForegroundColor Yellow
+            
+            $oldFile = Join-Path $commitPath (Split-Path $fileName -Leaf)
+            if (Test-Path $oldFile) {
+                Write-Host "`nShowing first 10 lines of each version:"
+                Write-Host "`n--- Committed version ---" -ForegroundColor Red
+                Get-Content $oldFile -TotalCount 10
+                Write-Host "`n+++ Current version ---" -ForegroundColor Green
+                Get-Content $fileName -TotalCount 10
+            }
+        } else {
+            Write-Host "`nFile: $fileName - No changes" -ForegroundColor Gray
+        }
+    }
+}
+```
+
+}
+
+# Merge branch (simple fast-forward)
+
+function Merge-VCSBranch {
+[CmdletBinding()]
+param(
+[Parameter(Mandatory=$true)]
+[string]$SourceBranch
+)
+
+```
+$manifest = Get-VCSManifest
+$currentBranch = $manifest.currentBranch
+
+if ($manifest.branches.PSObject.Properties.Name -notcontains $SourceBranch) {
+    Write-Warning "Branch '$SourceBranch' does not exist"
+    return
+}
+
+if ($SourceBranch -eq $currentBranch) {
+    Write-Warning "Cannot merge branch into itself"
+    return
+}
+
+# Simple fast-forward merge
+$sourceHead = $manifest.branches[$SourceBranch].head
+$sourceCommits = $manifest.branches[$SourceBranch].commits
+
+# Get commits that are in source but not in current
+$currentCommits = $manifest.branches[$currentBranch].commits
+$newCommits = $sourceCommits | Where-Object { $_ -notin $currentCommits }
+
+if ($newCommits.Count -eq 0) {
+    Write-Host "Already up to date." -ForegroundColor Gray
+    return
+}
+
+# Add new commits to current branch
+$manifest.branches[$currentBranch].commits += $newCommits
+$manifest.branches[$currentBranch].head = $sourceHead
+
+# Restore files from merged HEAD
+Restore-VCSCommit -CommitId $sourceHead -NoMessage
+
+Save-VCSManifest $manifest
+
+Write-Host "Merged '$SourceBranch' into '$currentBranch'" -ForegroundColor Green
+Write-Host "$($newCommits.Count) commit(s) merged" -ForegroundColor Gray
+```
+
+}
+
+# Export functions
+
+Export-ModuleMember -Function `Initialize-VCS,`
+Add-VCSFile, `New-VCSCommit,`
+Get-VCSStatus, `Get-VCSLog,`
+New-VCSBranch, `Switch-VCSBranch,`
+Get-VCSBranch, `Invoke-VCSCheckout,`
+Get-VCSDiff, `
+Merge-VCSBranch
+
+# Aliases for Git-like commands
+
+Set-Alias -Name vcs-init -Value Initialize-VCS
+Set-Alias -Name vcs-add -Value Add-VCSFile
+Set-Alias -Name vcs-commit -Value New-VCSCommit
+Set-Alias -Name vcs-status -Value Get-VCSStatus
+Set-Alias -Name vcs-log -Value Get-VCSLog
+Set-Alias -Name vcs-branch -Value New-VCSBranch
+Set-Alias -Name vcs-switch -Value Switch-VCSBranch
+Set-Alias -Name vcs-branches -Value Get-VCSBranch
+Set-Alias -Name vcs-checkout -Value Invoke-VCSCheckout
+Set-Alias -Name vcs-diff -Value Get-VCSDiff
+Set-Alias -Name vcs-merge -Value Merge-VCSBranch
+
+Export-ModuleMember -Alias `vcs-init, vcs-add, vcs-commit, vcs-status, vcs-log,`
+vcs-branch, vcs-switch, vcs-branches, vcs-checkout, `
+vcs-diff, vcs-merge
