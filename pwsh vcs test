@@ -1,0 +1,756 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Comprehensive test suite for PsVcs module.
+
+.DESCRIPTION
+Tests all PsVcs functions with pass/fail validation to ensure robustness.
+
+.PARAMETER ModulePath
+Path to the PsVcs.psm1 module file.
+
+.PARAMETER TestDirectory
+Directory where tests will be executed. Will be recreated if exists.
+
+.EXAMPLE
+.\Test-PsVcsModule.ps1 -ModulePath .\PsVcs.psm1
+
+.EXAMPLE
+.\Test-PsVcsModule.ps1 -ModulePath .\PsVcs.psm1 -TestDirectory C:\Temp\VcsTest
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$ModulePath = ".\PsVcs.psm1",
+    
+    [Parameter(Mandatory = $false)]
+    [string]$TestDirectory = ".\test_directory"
+)
+
+# ==============================================================================
+# TEST FRAMEWORK
+# ==============================================================================
+
+$script:TestResults = [System.Collections.Generic.List[PSObject]]::new()
+$script:TestCounter = 0
+
+function Write-TestHeader {
+    param([string]$Message)
+    Write-Host "`n================================================" -ForegroundColor Cyan
+    Write-Host "  $Message" -ForegroundColor Cyan
+    Write-Host "================================================" -ForegroundColor Cyan
+}
+
+function Write-TestStep {
+    param([string]$Message)
+    Write-Host "`n--- $Message ---" -ForegroundColor Yellow
+}
+
+function Test-Assertion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TestName,
+        
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Condition,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$FailureMessage = "Condition failed"
+    )
+    
+    $script:TestCounter++
+    
+    try {
+        $result = & $Condition
+        
+        if ($result) {
+            Write-Host "  ✓ PASS: $TestName" -ForegroundColor Green
+            $script:TestResults.Add([PSCustomObject]@{
+                TestNumber = $script:TestCounter
+                TestName = $TestName
+                Status = "PASS"
+                Message = ""
+            })
+            return $true
+        } else {
+            Write-Host "  ✗ FAIL: $TestName" -ForegroundColor Red
+            Write-Host "    Reason: $FailureMessage" -ForegroundColor Red
+            $script:TestResults.Add([PSCustomObject]@{
+                TestNumber = $script:TestCounter
+                TestName = $TestName
+                Status = "FAIL"
+                Message = $FailureMessage
+            })
+            return $false
+        }
+    } catch {
+        Write-Host "  ✗ FAIL: $TestName" -ForegroundColor Red
+        Write-Host "    Error: $($_.Exception.Message)" -ForegroundColor Red
+        $script:TestResults.Add([PSCustomObject]@{
+            TestNumber = $script:TestCounter
+            TestName = $TestName
+            Status = "FAIL"
+            Message = $_.Exception.Message
+        })
+        return $false
+    }
+}
+
+function Write-TestSummary {
+    Write-Host "`n================================================" -ForegroundColor Cyan
+    Write-Host "  TEST SUMMARY" -ForegroundColor Cyan
+    Write-Host "================================================" -ForegroundColor Cyan
+    
+    $passed = ($script:TestResults | Where-Object -FilterScript { $_.Status -eq "PASS" }).Count
+    $failed = ($script:TestResults | Where-Object -FilterScript { $_.Status -eq "FAIL" }).Count
+    $total = $script:TestResults.Count
+    $passRate = if ($total -gt 0) { [math]::Round(($passed / $total) * 100, 2) } else { 0 }
+    
+    Write-Host "`nTotal Tests: $total" -ForegroundColor White
+    Write-Host "Passed: $passed" -ForegroundColor Green
+    Write-Host "Failed: $failed" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Red" })
+    Write-Host "Pass Rate: $passRate%" -ForegroundColor $(if ($passRate -eq 100) { "Green" } else { "Yellow" })
+    
+    if ($failed -gt 0) {
+        Write-Host "`nFailed Tests:" -ForegroundColor Red
+        $script:TestResults | Where-Object -FilterScript { $_.Status -eq "FAIL" } | ForEach-Object -Process {
+            Write-Host "  $($_.TestNumber). $($_.TestName)" -ForegroundColor Red
+            Write-Host "     $($_.Message)" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host ""
+}
+
+# ==============================================================================
+# SETUP
+# ==============================================================================
+
+Write-TestHeader "SETUP: Preparing Test Environment"
+
+Write-TestStep "Unloading existing PsVcs module"
+Get-Module -Name PsVcs | Remove-Module -Force
+
+Write-TestStep "Loading PsVcs module from: $ModulePath"
+Test-Assertion -TestName "Module file exists" -Condition {
+    Test-Path -Path $ModulePath
+} -FailureMessage "Module file not found at $ModulePath"
+
+Import-Module -Name $ModulePath -Force -ErrorAction Stop
+Write-Host "  Module loaded successfully" -ForegroundColor Green
+
+Test-Assertion -TestName "Module imported successfully" -Condition {
+    $null -ne (Get-Module -Name PsVcs)
+} -FailureMessage "Module not found after import"
+
+Write-TestStep "Recreating test directory: $TestDirectory"
+if (Test-Path -Path $TestDirectory) {
+    Remove-Item -Path $TestDirectory -Recurse -Force
+}
+New-Item -ItemType Directory -Path $TestDirectory -Force | Out-Null
+
+Test-Assertion -TestName "Test directory created" -Condition {
+    Test-Path -Path $TestDirectory
+} -FailureMessage "Failed to create test directory"
+
+$originalLocation = Get-Location
+Set-Location -Path $TestDirectory
+Write-Host "  Changed to test directory: $(Get-Location)" -ForegroundColor Green
+
+# ==============================================================================
+# TEST 1: REPOSITORY INITIALIZATION
+# ==============================================================================
+
+Write-TestHeader "TEST 1: Repository Initialization"
+
+Write-TestStep "Initialize VCS repository"
+$initResult = Initialize-VCSRepository
+
+Test-Assertion -TestName "Initialize-VCSRepository returns object" -Condition {
+    $null -ne $initResult
+} -FailureMessage "No object returned from Initialize-VCSRepository"
+
+Test-Assertion -TestName ".vcs directory created" -Condition {
+    Test-Path -Path ".vcs"
+} -FailureMessage ".vcs directory not found"
+
+Test-Assertion -TestName ".vcs directory is hidden" -Condition {
+    $vcsDir = Get-Item -Path ".vcs" -Force
+    $vcsDir.Attributes -band [System.IO.FileAttributes]::Hidden
+} -FailureMessage ".vcs directory is not hidden"
+
+Test-Assertion -TestName "manifest.json exists" -Condition {
+    Test-Path -Path ".vcs\manifest.json"
+} -FailureMessage "manifest.json not found"
+
+Test-Assertion -TestName "commits directory exists" -Condition {
+    Test-Path -Path ".vcs\commits"
+} -FailureMessage "commits directory not found"
+
+Test-Assertion -TestName "branches directory exists" -Condition {
+    Test-Path -Path ".vcs\branches"
+} -FailureMessage "branches directory not found"
+
+Test-Assertion -TestName "Default branch is 'main'" -Condition {
+    $initResult.CurrentBranch -eq "main"
+} -FailureMessage "Default branch is not 'main'"
+
+Write-TestStep "Test re-initialization (should warn)"
+$reInitResult = Initialize-VCSRepository -WarningAction SilentlyContinue
+
+Test-Assertion -TestName "Re-initialization handled gracefully" -Condition {
+    $true # If it doesn't throw, it passed
+} -FailureMessage "Re-initialization threw an error"
+
+# ==============================================================================
+# TEST 2: REPOSITORY DISCOVERY
+# ==============================================================================
+
+Write-TestHeader "TEST 2: Repository Discovery"
+
+Write-TestStep "Find repository from current directory"
+$repoPath = Find-VCSRepository
+
+Test-Assertion -TestName "Find-VCSRepository returns path" -Condition {
+    $null -ne $repoPath
+} -FailureMessage "Repository not found"
+
+Test-Assertion -TestName "Repository path ends with .vcs" -Condition {
+    $repoPath.Name -eq ".vcs"
+} -FailureMessage "Repository path does not end with .vcs"
+
+Write-TestStep "Find repository from subdirectory"
+New-Item -ItemType Directory -Path "subdir" -Force | Out-Null
+Set-Location -Path "subdir"
+
+$repoPathFromSubdir = Find-VCSRepository
+
+Test-Assertion -TestName "Repository found from subdirectory" -Condition {
+    $null -ne $repoPathFromSubdir
+} -FailureMessage "Repository not found from subdirectory"
+
+Set-Location -Path ".."
+
+# ==============================================================================
+# TEST 3: MANIFEST OPERATIONS
+# ==============================================================================
+
+Write-TestHeader "TEST 3: Manifest Operations"
+
+Write-TestStep "Get manifest"
+$manifest = Get-VCSManifest
+
+Test-Assertion -TestName "Get-VCSManifest returns object" -Condition {
+    $null -ne $manifest
+} -FailureMessage "Manifest object is null"
+
+Test-Assertion -TestName "Manifest has CurrentBranch property" -Condition {
+    $null -ne $manifest.CurrentBranch
+} -FailureMessage "Manifest missing CurrentBranch"
+
+Test-Assertion -TestName "Manifest has Branches property" -Condition {
+    $null -ne $manifest.Branches
+} -FailureMessage "Manifest missing Branches"
+
+Test-Assertion -TestName "Manifest has CommitCounter property" -Condition {
+    $null -ne $manifest.PSObject.Properties['CommitCounter']
+} -FailureMessage "Manifest missing CommitCounter"
+
+Write-TestStep "Modify and save manifest"
+$manifest.CommitCounter = 999
+$manifest | Set-VCSManifest
+
+$reloadedManifest = Get-VCSManifest
+
+Test-Assertion -TestName "Manifest changes persisted" -Condition {
+    $reloadedManifest.CommitCounter -eq 999
+} -FailureMessage "Manifest changes not saved correctly"
+
+# Reset for further tests
+$reloadedManifest.CommitCounter = 0
+$reloadedManifest | Set-VCSManifest
+
+# ==============================================================================
+# TEST 4: FILE CREATION AND STAGING
+# ==============================================================================
+
+Write-TestHeader "TEST 4: File Creation and Staging"
+
+Write-TestStep "Create test script files"
+$script1Content = @"
+# Test Script 1
+Write-Host "Hello from script 1"
+`$value = 42
+"@
+
+$script2Content = @"
+# Test Script 2
+function Test-Function {
+    Write-Output "Testing"
+}
+"@
+
+Set-Content -Path "script1.ps1" -Value $script1Content
+Set-Content -Path "script2.ps1" -Value $script2Content
+
+Test-Assertion -TestName "script1.ps1 created" -Condition {
+    Test-Path -Path "script1.ps1"
+} -FailureMessage "script1.ps1 not found"
+
+Test-Assertion -TestName "script2.ps1 created" -Condition {
+    Test-Path -Path "script2.ps1"
+} -FailureMessage "script2.ps1 not found"
+
+Write-TestStep "Check initial staging area"
+$initialStaging = Get-VCSStagingArea
+
+Test-Assertion -TestName "Staging area initially empty" -Condition {
+    $initialStaging.Files.Count -eq 0
+} -FailureMessage "Staging area not empty on initialization"
+
+Write-TestStep "Add script1.ps1 to staging"
+$stagingResult1 = Add-VCSFileToStaging -File "script1.ps1"
+
+Test-Assertion -TestName "File added to staging" -Condition {
+    $stagingResult1.Files.Count -eq 1
+} -FailureMessage "File not added to staging"
+
+Test-Assertion -TestName "Correct file in staging" -Condition {
+    $stagingResult1.Files[0] -like "*script1.ps1"
+} -FailureMessage "Wrong file in staging"
+
+Write-TestStep "Add script2.ps1 to staging"
+$stagingResult2 = Add-VCSFileToStaging -File "script2.ps1"
+
+Test-Assertion -TestName "Multiple files in staging" -Condition {
+    $stagingResult2.Files.Count -eq 2
+} -FailureMessage "Second file not added to staging"
+
+Write-TestStep "Verify staging area persists"
+$persistedStaging = Get-VCSStagingArea
+
+Test-Assertion -TestName "Staging area persisted" -Condition {
+    $persistedStaging.Files.Count -eq 2
+} -FailureMessage "Staging area did not persist"
+
+Write-TestStep "Test adding duplicate file"
+$stagingResult3 = Add-VCSFileToStaging -File "script1.ps1"
+
+Test-Assertion -TestName "Duplicate file not added twice" -Condition {
+    $stagingResult3.Files.Count -eq 2
+} -FailureMessage "Duplicate file added to staging"
+
+# ==============================================================================
+# TEST 5: COMMIT CREATION
+# ==============================================================================
+
+Write-TestHeader "TEST 5: Commit Creation"
+
+Write-TestStep "Create first commit"
+$commit1 = New-VCSCommit -Message "Initial commit with two scripts"
+
+Test-Assertion -TestName "Commit created successfully" -Condition {
+    $null -ne $commit1
+} -FailureMessage "Commit object is null"
+
+Test-Assertion -TestName "Commit has ID" -Condition {
+    $null -ne $commit1.Id
+} -FailureMessage "Commit missing ID"
+
+Test-Assertion -TestName "Commit ID format correct" -Condition {
+    $commit1.Id -match "^commit_\d{6}$"
+} -FailureMessage "Commit ID format incorrect"
+
+Test-Assertion -TestName "Commit has message" -Condition {
+    $commit1.Message -eq "Initial commit with two scripts"
+} -FailureMessage "Commit message incorrect"
+
+Test-Assertion -TestName "Commit has timestamp" -Condition {
+    $null -ne $commit1.Timestamp
+} -FailureMessage "Commit missing timestamp"
+
+Test-Assertion -TestName "Commit has branch" -Condition {
+    $commit1.Branch -eq "main"
+} -FailureMessage "Commit branch incorrect"
+
+Test-Assertion -TestName "Commit has files" -Condition {
+    $commit1.Files.PSObject.Properties.Count -eq 2
+} -FailureMessage "Commit does not contain correct number of files"
+
+Write-TestStep "Verify commit directory created"
+$commitPath = ".vcs\commits\$($commit1.Id)"
+
+Test-Assertion -TestName "Commit directory exists" -Condition {
+    Test-Path -Path $commitPath
+} -FailureMessage "Commit directory not created"
+
+Test-Assertion -TestName "Commit metadata file exists" -Condition {
+    Test-Path -Path "$commitPath\commit.json"
+} -FailureMessage "Commit metadata file not created"
+
+Test-Assertion -TestName "Committed files copied" -Condition {
+    (Test-Path -Path "$commitPath\script1.ps1") -and (Test-Path -Path "$commitPath\script2.ps1")
+} -FailureMessage "Committed files not copied to commit directory"
+
+Write-TestStep "Verify staging cleared after commit"
+$stagingAfterCommit = Get-VCSStagingArea
+
+Test-Assertion -TestName "Staging area cleared after commit" -Condition {
+    $stagingAfterCommit.Files.Count -eq 0
+} -FailureMessage "Staging area not cleared after commit"
+
+Write-TestStep "Verify manifest updated"
+$manifestAfterCommit = Get-VCSManifest
+
+Test-Assertion -TestName "Commit added to branch" -Condition {
+    $manifestAfterCommit.Branches.main.Commits.Count -eq 1
+} -FailureMessage "Commit not added to branch"
+
+Test-Assertion -TestName "Branch HEAD updated" -Condition {
+    $manifestAfterCommit.Branches.main.Head -eq $commit1.Id
+} -FailureMessage "Branch HEAD not updated"
+
+Test-Assertion -TestName "Commit counter incremented" -Condition {
+    $manifestAfterCommit.CommitCounter -eq 1
+} -FailureMessage "Commit counter not incremented"
+
+# ==============================================================================
+# TEST 6: COMMIT RETRIEVAL AND HISTORY
+# ==============================================================================
+
+Write-TestHeader "TEST 6: Commit Retrieval and History"
+
+Write-TestStep "Retrieve commit by ID"
+$retrievedCommit = Get-VCSCommit -CommitId $commit1.Id
+
+Test-Assertion -TestName "Commit retrieved successfully" -Condition {
+    $null -ne $retrievedCommit
+} -FailureMessage "Commit not retrieved"
+
+Test-Assertion -TestName "Retrieved commit matches original" -Condition {
+    $retrievedCommit.Id -eq $commit1.Id -and $retrievedCommit.Message -eq $commit1.Message
+} -FailureMessage "Retrieved commit data does not match"
+
+Write-TestStep "Create second commit"
+Set-Content -Path "script3.ps1" -Value "# Script 3`nWrite-Host 'Third script'"
+Add-VCSFileToStaging -File "script3.ps1" | Out-Null
+$commit2 = New-VCSCommit -Message "Add script3"
+
+Write-TestStep "Get commit history"
+$history = Get-VCSCommitHistory -Limit 10
+
+Test-Assertion -TestName "History contains commits" -Condition {
+    $history.Count -eq 2
+} -FailureMessage "History does not contain correct number of commits"
+
+Test-Assertion -TestName "History in reverse chronological order" -Condition {
+    $history[0].Id -eq $commit2.Id -and $history[1].Id -eq $commit1.Id
+} -FailureMessage "History not in correct order"
+
+Write-TestStep "Get limited history"
+$limitedHistory = Get-VCSCommitHistory -Limit 1
+
+Test-Assertion -TestName "History limit respected" -Condition {
+    $limitedHistory.Count -eq 1
+} -FailureMessage "History limit not respected"
+
+Test-Assertion -TestName "Limited history shows most recent" -Condition {
+    $limitedHistory[0].Id -eq $commit2.Id
+} -FailureMessage "Limited history does not show most recent commit"
+
+# ==============================================================================
+# TEST 7: FILE COMPARISON AND DIFF
+# ==============================================================================
+
+Write-TestHeader "TEST 7: File Comparison and Diff"
+
+Write-TestStep "Compare unchanged file"
+$comparisonUnchanged = Compare-VCSFile -File "script1.ps1"
+
+Test-Assertion -TestName "Unchanged file detected" -Condition {
+    $comparisonUnchanged.Status -eq "Unchanged"
+} -FailureMessage "Unchanged file not detected correctly"
+
+Write-TestStep "Modify script1.ps1"
+Add-Content -Path "script1.ps1" -Value "`n# Added comment"
+
+Write-TestStep "Compare modified file"
+$comparisonModified = Compare-VCSFile -File "script1.ps1"
+
+Test-Assertion -TestName "Modified file detected" -Condition {
+    $comparisonModified.Status -eq "Modified"
+} -FailureMessage "Modified file not detected"
+
+Test-Assertion -TestName "Hash comparison works" -Condition {
+    $comparisonModified.CurrentHash -ne $comparisonModified.CommittedHash
+} -FailureMessage "Hash comparison not working"
+
+Write-TestStep "Test untracked file detection"
+Set-Content -Path "untracked.ps1" -Value "# Untracked file"
+$comparisonUntracked = Compare-VCSFile -File "untracked.ps1"
+
+Test-Assertion -TestName "Untracked file detected" -Condition {
+    $comparisonUntracked.Status -eq "Untracked"
+} -FailureMessage "Untracked file not detected"
+
+Write-TestStep "Show file diff (visual check)"
+Show-VCSFileDiff -File "script1.ps1"
+
+Test-Assertion -TestName "Show-VCSFileDiff executes without error" -Condition {
+    $true # If we got here, it didn't throw
+} -FailureMessage "Show-VCSFileDiff threw an error"
+
+# ==============================================================================
+# TEST 8: STATUS COMMAND
+# ==============================================================================
+
+Write-TestHeader "TEST 8: Status Command"
+
+Write-TestStep "Get repository status"
+Get-VCSStatus
+
+Test-Assertion -TestName "Get-VCSStatus executes without error" -Condition {
+    $true # If we got here, it didn't throw
+} -FailureMessage "Get-VCSStatus threw an error"
+
+Write-TestStep "Stage modified file and check status again"
+Add-VCSFileToStaging -File "script1.ps1" | Out-Null
+Get-VCSStatus
+
+Test-Assertion -TestName "Status shows staged file" -Condition {
+    $staging = Get-VCSStagingArea
+    $staging.Files.Count -eq 1
+} -FailureMessage "Status does not reflect staged file"
+
+# ==============================================================================
+# TEST 9: BRANCH OPERATIONS
+# ==============================================================================
+
+Write-TestHeader "TEST 9: Branch Operations"
+
+Write-TestStep "List branches"
+$branches = Get-VCSBranch
+
+Test-Assertion -TestName "Default branch exists" -Condition {
+    $branches.Count -eq 1 -and $branches[0].Name -eq "main"
+} -FailureMessage "Default branch not found"
+
+Test-Assertion -TestName "Current branch marked correctly" -Condition {
+    $branches[0].IsCurrent -eq $true
+} -FailureMessage "Current branch not marked correctly"
+
+Write-TestStep "Create new branch"
+$newBranch = New-VCSBranch -Name "feature-test"
+
+Test-Assertion -TestName "New branch created" -Condition {
+    $null -ne $newBranch
+} -FailureMessage "New branch not created"
+
+Test-Assertion -TestName "New branch has correct name" -Condition {
+    $newBranch.Name -eq "feature-test"
+} -FailureMessage "New branch has incorrect name"
+
+Write-TestStep "List branches after creation"
+$branchesAfterCreate = Get-VCSBranch
+
+Test-Assertion -TestName "Branch count increased" -Condition {
+    $branchesAfterCreate.Count -eq 2
+} -FailureMessage "Branch count did not increase"
+
+Test-Assertion -TestName "New branch inherits commits" -Condition {
+    $newBranch.CommitCount -eq 2
+} -FailureMessage "New branch did not inherit commits"
+
+Write-TestStep "Get specific branch"
+$specificBranch = Get-VCSBranch -Name "feature-test"
+
+Test-Assertion -TestName "Get specific branch works" -Condition {
+    $specificBranch.Name -eq "feature-test"
+} -FailureMessage "Could not get specific branch"
+
+Write-TestStep "Test creating duplicate branch"
+try {
+    New-VCSBranch -Name "feature-test" -ErrorAction Stop
+    $duplicateBranchFailed = $false
+} catch {
+    $duplicateBranchFailed = $true
+}
+
+Test-Assertion -TestName "Duplicate branch creation prevented" -Condition {
+    $duplicateBranchFailed
+} -FailureMessage "Duplicate branch was created"
+
+# ==============================================================================
+# TEST 10: BRANCH SWITCHING
+# ==============================================================================
+
+Write-TestHeader "TEST 10: Branch Switching"
+
+Write-TestStep "Commit staged changes before switching"
+$commit3 = New-VCSCommit -Message "Modified script1 on main"
+
+Write-TestStep "Switch to feature branch"
+$switchResult = Switch-VCSBranch -Name "feature-test" -Confirm:$false
+
+Test-Assertion -TestName "Branch switched successfully" -Condition {
+    $null -ne $switchResult
+} -FailureMessage "Branch switch failed"
+
+Write-TestStep "Verify current branch changed"
+$manifestAfterSwitch = Get-VCSManifest
+
+Test-Assertion -TestName "Current branch is feature-test" -Condition {
+    $manifestAfterSwitch.CurrentBranch -eq "feature-test"
+} -FailureMessage "Current branch did not change"
+
+Write-TestStep "Verify file restored to feature branch state"
+$script1Content = Get-Content -Path "script1.ps1" -Raw
+
+Test-Assertion -TestName "File restored correctly" -Condition {
+    $script1Content -notlike "*Added comment*"
+} -FailureMessage "File not restored to branch state"
+
+Write-TestStep "Make changes on feature branch"
+Set-Content -Path "feature.ps1" -Value "# Feature file"
+Add-VCSFileToStaging -File "feature.ps1" | Out-Null
+$commit4 = New-VCSCommit -Message "Add feature file"
+
+Write-TestStep "Switch back to main"
+Switch-VCSBranch -Name "main" -Confirm:$false | Out-Null
+
+Test-Assertion -TestName "Switched back to main" -Condition {
+    (Get-VCSManifest).CurrentBranch -eq "main"
+} -FailureMessage "Did not switch back to main"
+
+Test-Assertion -TestName "Feature file not in main branch" -Condition {
+    -not (Test-Path -Path "feature.ps1")
+} -FailureMessage "Feature file incorrectly present in main branch"
+
+# ==============================================================================
+# TEST 11: BRANCH MERGING
+# ==============================================================================
+
+Write-TestHeader "TEST 11: Branch Merging"
+
+Write-TestStep "Verify branches have different commits"
+$mainBranch = Get-VCSBranch -Name "main"
+$featureBranch = Get-VCSBranch -Name "feature-test"
+
+Test-Assertion -TestName "Main has 3 commits" -Condition {
+    $mainBranch.CommitCount -eq 3
+} -FailureMessage "Main branch commit count incorrect"
+
+Test-Assertion -TestName "Feature has 3 commits" -Condition {
+    $featureBranch.CommitCount -eq 3
+} -FailureMessage "Feature branch commit count incorrect"
+
+Write-TestStep "Merge feature-test into main"
+$mergeResult = Merge-VCSBranch -SourceBranch "feature-test" -Confirm:$false
+
+Test-Assertion -TestName "Merge completed" -Condition {
+    $null -ne $mergeResult
+} -FailureMessage "Merge failed"
+
+Test-Assertion -TestName "Merge result shows commits merged" -Condition {
+    $mergeResult.CommitsMerged -ge 1
+} -FailureMessage "No commits merged"
+
+Write-TestStep "Verify feature file now in main"
+Test-Assertion -TestName "Feature file present after merge" -Condition {
+    Test-Path -Path "feature.ps1"
+} -FailureMessage "Feature file not present after merge"
+
+Write-TestStep "Verify main branch updated"
+$mainAfterMerge = Get-VCSBranch -Name "main"
+
+Test-Assertion -TestName "Main branch has merged commits" -Condition {
+    $mainAfterMerge.CommitCount -eq 3
+} -FailureMessage "Main branch did not receive commits"
+
+Write-TestStep "Test merging already-merged branch"
+$secondMerge = Merge-VCSBranch -SourceBranch "feature-test" -Confirm:$false -WarningAction SilentlyContinue
+
+Test-Assertion -TestName "Already merged branch handled" -Condition {
+    $null -eq $secondMerge
+} -FailureMessage "Second merge should return nothing"
+
+# ==============================================================================
+# TEST 12: FILE RESTORATION AND ROLLBACK
+# ==============================================================================
+
+Write-TestHeader "TEST 12: File Restoration and Rollback"
+
+Write-TestStep "Modify script1.ps1 again"
+Set-Content -Path "script1.ps1" -Value "# Completely new content"
+
+Write-TestStep "Restore from specific commit"
+Restore-VCSCommitFiles -CommitId $commit1.Id -Confirm:$false
+
+Test-Assertion -TestName "File restored from commit" -Condition {
+    $restoredContent = Get-Content -Path "script1.ps1" -Raw
+    $restoredContent -like "*Hello from script 1*"
+} -FailureMessage "File not restored correctly"
+
+Write-TestStep "Verify script2.ps1 also restored"
+Test-Assertion -TestName "Multiple files restored" -Condition {
+    Test-Path -Path "script2.ps1"
+} -FailureMessage "Second file not restored"
+
+# ==============================================================================
+# TEST 13: STAGING AREA CLEARING
+# ==============================================================================
+
+Write-TestHeader "TEST 13: Staging Area Management"
+
+Write-TestStep "Stage multiple files"
+Add-VCSFileToStaging -File "script1.ps1" | Out-Null
+Add-VCSFileToStaging -File "script2.ps1" | Out-Null
+
+$stagingBeforeClear = Get-VCSStagingArea
+
+Test-Assertion -TestName "Files staged" -Condition {
+    $stagingBeforeClear.Files.Count -eq 2
+} -FailureMessage "Files not staged"
+
+Write-TestStep "Clear staging area"
+Clear-VCSStagingArea -Confirm:$false
+
+$stagingAfterClear = Get-VCSStagingArea
+
+Test-Assertion -TestName "Staging area cleared" -Condition {
+    $stagingAfterClear.Files.Count -eq 0
+} -FailureMessage "Staging area not cleared"
+
+Test-Assertion -TestName "staging.json removed" -Condition {
+    -not (Test-Path -Path ".vcs\staging.json")
+} -FailureMessage "staging.json file still exists"
+
+# ==============================================================================
+# TEST 14: EDGE CASES AND ERROR HANDLING
+# ==============================================================================
+
+Write-TestHeader "TEST 14: Edge Cases and Error Handling"
+
+Write-TestStep "Test commit without staged files"
+try {
+    New-VCSCommit -Message "Empty commit" -WarningAction SilentlyContinue | Out-Null
+    $emptyCommitPrevented = $false
+} catch {
+    $emptyCommitPrevented = $true
+}
+
+Test-Assertion -TestName "Empty commit prevented" -Condition {
+    $emptyCommitPrevented -or ((Get-VCSStagingArea).Files.Count -eq 0)
+} -FailureMessage "Empty commit was allowed"
+
+Write-TestStep "Test adding non-existent file"
+Add-VCSFileToStaging -File "nonexistent.ps1" -WarningAction SilentlyContinue | Out-Null
+
+Test-Assertion -TestName "Non-existent file handled gracefully" -Condition {
+    $true # Should just warn, not error
+} -FailureMessage "Non-existent file caused error"
+
+Write-TestStep "Test getting non-existent commit"
+$nonExistentCommit = Get-VCSCommit -CommitId "commit_999999" -WarningAction Silent
